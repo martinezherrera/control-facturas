@@ -1,0 +1,24 @@
+# Nada de esto debe salir del computador.
+# El repositorio es publico: cualquier archivo versionado queda a la vista.
+
+# Fuente de datos
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+
+# Correspondencia codigo -> razon social
+proveedores_map.csv
+proveedores_map.*
+
+# Version local del dashboard, que si lleva razones sociales reales
+dashboard_facturas.html
+
+# Scripts y temporales
+*.py
+*.bat
+__pycache__/
+~$*
+*.tmp
+.DS_Store
+Thumbs.db
