@@ -32,6 +32,28 @@ GRUPOS = {
 }
 HOJA_PARAM = {'PRIMARIA': 'PRIMARIA', 'SECUNDARIA': 'SECUNDARIA', 'OTROS': None}
 
+# Palabras clave para deducir el CANAL desde la Descripcion, en el MISMO
+# orden de prioridad que la formula de la columna CANAL del Excel.
+# Se usa como respaldo: si la celda trae texto, ese manda.
+CANAL_KEYWORDS = ['MATERIA PRIMA', 'SECUNDARIA', 'PRIMARIA', 'BANDEJAS', 'OTROS']
+
+
+def normalizar_canal(v):
+    """Quita espacios y pasa a mayusculas; devuelve None si queda vacio."""
+    if v is None:
+        return None
+    t = str(v).strip().upper()
+    return t if t and t != 'NAN' else None
+
+
+def derivar_canal(descripcion):
+    """Replica la formula de la columna CANAL sobre la Descripcion."""
+    t = str(descripcion or '').upper()
+    for kw in CANAL_KEYWORDS:
+        if kw in t:
+            return kw
+    return None
+
 _args = [a for a in sys.argv[1:] if not a.startswith('--')]
 XLSX = _args[0] if len(_args) > 0 else 'control de ingresos facturas.xlsx'
 HTML = _args[1] if len(_args) > 1 else 'dashboard_facturas.html'
@@ -48,7 +70,18 @@ def leer(path):
     ex = pd.read_excel(path, sheet_name='Exported')
     ex = ex[['CANAL', 'Orden', 'Descripción', 'Estado', 'Proveedor',
              'Ordenado', 'Fecha de cierre']].copy()
-    ex['CANAL'] = ex['CANAL'].astype('object').where(ex['CANAL'].notna(), None)
+    # El CANAL puede venir como texto o como formula. Si es formula, pandas
+    # lee el valor que Excel dejo guardado, y ese valor NO existe cuando el
+    # libro fue escrito por una herramienta que no ejecuta formulas.
+    # Por eso: se normaliza lo que haya, y lo que quede vacio se deduce de
+    # la Descripcion con la misma regla que usa la formula.
+    ex['CANAL'] = ex['CANAL'].map(normalizar_canal)
+    faltan = ex['CANAL'].isna()
+    if faltan.any():
+        ex.loc[faltan, 'CANAL'] = ex.loc[faltan, 'Descripción'].map(derivar_canal)
+        recuperadas = int(faltan.sum() - ex['CANAL'].isna().sum())
+        print(f'  CANAL: {int(faltan.sum())} filas sin valor guardado, '
+              f'{recuperadas} deducidas desde la Descripcion.')
     ex['Fecha de cierre'] = pd.to_datetime(ex['Fecha de cierre'], errors='coerce')
     ex = ex[ex['Estado'].isin(ESTADOS) & ex['Fecha de cierre'].notna()]
     params = {}
