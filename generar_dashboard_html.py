@@ -1,4 +1,132 @@
-<!DOCTYPE html>
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Genera el dashboard de control de facturas a partir del Excel.
+
+Salida: index.html + datos.js, en la carpeta indicada con --web (por
+defecto la carpeta actual). Se publica en GitHub Pages, igual que el
+dashboard del WMS, para que el servidor de las pantallas lo alcance.
+
+Uso:
+    python generar_dashboard_html.py
+    python generar_dashboard_html.py "archivo.xlsx" --web .
+
+Requiere: pandas, openpyxl   ->   pip install pandas openpyxl
+"""
+import sys, os, json, csv, datetime, calendar
+import pandas as pd
+
+# ----------------------------------------------------------------------
+# Regla del modelo (reconstruida desde Hoja3 y validada contra sus totales)
+#   Estado "Cerrada" o "Cerrada para recepcion"
+#   Y Fecha de cierre dentro del mes
+#
+# CIERRE DE MES = TOTAL FACTURADO + PROVISION DEL MES - REVIERTE PROVISION
+# El PRESUPUESTO se compara contra el CIERRE DE MES (no contra el total facturado).
+# ----------------------------------------------------------------------
+ESTADOS = ['Cerrada', 'Cerrada para recepción']
+GRUPOS = {
+    'PRIMARIA':   ['PRIMARIA'],
+    'SECUNDARIA': ['SECUNDARIA'],
+    'OTROS':      ['OTROS', 'MATERIA PRIMA', 'BANDEJAS'],
+}
+HOJA_PARAM = {'PRIMARIA': 'PRIMARIA', 'SECUNDARIA': 'SECUNDARIA', 'OTROS': None}
+
+_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+XLSX = _args[0] if len(_args) > 0 else 'control de ingresos facturas.xlsx'
+HTML = _args[1] if len(_args) > 1 else 'dashboard_facturas.html'
+WEB = None
+if '--web' in sys.argv:
+    i = sys.argv.index('--web')
+    WEB = sys.argv[i + 1] if len(sys.argv) > i + 1 else 'dashboard-web'
+
+MESES_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio',
+            'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+
+
+def leer(path):
+    ex = pd.read_excel(path, sheet_name='Exported')
+    ex = ex[['CANAL', 'Orden', 'Descripción', 'Estado', 'Proveedor',
+             'Ordenado', 'Fecha de cierre']].copy()
+    ex['CANAL'] = ex['CANAL'].astype('object').where(ex['CANAL'].notna(), None)
+    ex['Fecha de cierre'] = pd.to_datetime(ex['Fecha de cierre'], errors='coerce')
+    ex = ex[ex['Estado'].isin(ESTADOS) & ex['Fecha de cierre'].notna()]
+    params = {}
+    for h in ('PRIMARIA', 'SECUNDARIA'):
+        p = pd.read_excel(path, sheet_name=h)
+        p['FECHA'] = pd.to_datetime(p['FECHA'], errors='coerce')
+        params[h] = {
+            d.strftime('%Y-%m'): {
+                'presupuesto': None if pd.isna(r['PRESUPUESTO']) else float(r['PRESUPUESTO']),
+                'provision':   None if pd.isna(r['PROVISION']) else float(r['PROVISION']),
+                'reversa':     None if pd.isna(r['REVERSA PROVISION']) else float(r['REVERSA PROVISION']),
+            }
+            for d, (_, r) in zip(p['FECHA'], p.iterrows()) if not pd.isna(d)
+        }
+    return ex, params
+
+
+def construir(ex, params):
+    ex = ex.copy()
+    ex['mes'] = ex['Fecha de cierre'].dt.strftime('%Y-%m')
+    ex['dia'] = ex['Fecha de cierre'].dt.day
+
+    canal_a_grupo = {c: g for g, cs in GRUPOS.items() for c in cs}
+    ex['grupo'] = ex['CANAL'].map(canal_a_grupo)
+
+    meses = sorted(set(ex['mes']) | set(params['PRIMARIA']) | set(params['SECUNDARIA']))
+    out = {}
+    for m in meses:
+        sub = ex[ex['mes'] == m]
+        anio, mm = int(m[:4]), int(m[5:])
+        ndias = calendar.monthrange(anio, mm)[1]
+        filas, series = [], {}
+        for g in GRUPOS:
+            s = sub[sub['grupo'] == g]
+            total = float(s['Ordenado'].sum())
+            hoja = HOJA_PARAM[g]
+            pr = params[hoja].get(m, {}) if hoja else {}
+            presup, prov, rev = pr.get('presupuesto'), pr.get('provision'), pr.get('reversa')
+            cierre = total - (rev or 0) + (prov or 0)
+            filas.append({
+                'cuenta': g, 'cierre': cierre, 'presupuesto': presup,
+                'reversa': rev, 'provision': prov, 'total': total,
+                'n': int(len(s)),
+                'avance': (cierre / presup) if presup else None,
+                'saldo': (presup - cierre) if presup else None,
+            })
+            if g in ('PRIMARIA', 'SECUNDARIA'):
+                # ingreso de facturas: monto facturado acumulado dia a dia.
+                # Sin ajuste de provision; termina en TOTAL FACTURAS MES.
+                por_dia = s.groupby('dia')['Ordenado'].sum()
+                acum, running = [], 0.0
+                for d in range(1, ndias + 1):
+                    running += float(por_dia.get(d, 0.0))
+                    acum.append(running)
+                series[g] = acum
+
+            det = (s.groupby('Proveedor')['Ordenado']
+                     .agg(['count', 'sum']).reset_index()
+                     .sort_values('sum', ascending=False))
+            filas[-1]['detalle'] = [
+                {'prov': r['Proveedor'], 'n': int(r['count']), 'monto': float(r['sum'])}
+                for _, r in det.iterrows()]
+
+        sin_canal = sub[sub['grupo'].isna()]
+        out[m] = {
+            'etiqueta': f'{MESES_ES[mm-1]} {anio}',
+            'ndias': ndias,
+            'filas': filas,
+            'series': series,
+            'presupuestos': {g: (params[HOJA_PARAM[g]].get(m, {}) or {}).get('presupuesto')
+                             for g in ('PRIMARIA', 'SECUNDARIA')},
+            'sin_canal': {'n': int(len(sin_canal)),
+                          'monto': float(sin_canal['Ordenado'].sum())},
+        }
+    return out
+
+
+TPL = r"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
@@ -100,8 +228,8 @@
   <header>
     <div>
       <h1>Control de facturas</h1>
-      <p class="sub">Estado &laquo;Cerrada&raquo; o &laquo;Cerrada para recepci&oacute;n&raquo; con fecha de cierre dentro del mes &middot; generado <span id="sello">13-09-2026 19:53</span></p>
-      
+      <p class="sub">Estado &laquo;Cerrada&raquo; o &laquo;Cerrada para recepci&oacute;n&raquo; con fecha de cierre dentro del mes &middot; generado <span id="sello">__STAMP__</span></p>
+      __AVISO__
     </div>
     <label class="sel">Mes <select id="mes"></select></label>
   </header>
@@ -125,7 +253,7 @@
 </div>
 <div class="tip" id="tip"></div>
 
-<script src="datos.js"></script>
+__DATOS_INLINE__
 <script>
 const fmt  = n => n==null ? "–" : "$" + Math.round(n).toLocaleString("es-CL");
 const fmtK = n => n==null ? "–" : "$" + Math.round(n/1e6).toLocaleString("es-CL") + "M";
@@ -280,3 +408,31 @@ render(selMes.value);
 </script>
 </body>
 </html>
+"""
+
+
+def main():
+    if not os.path.exists(XLSX):
+        sys.exit(f'No encuentro el archivo: {XLSX}')
+    ex, params = leer(XLSX)
+    datos = construir(ex, params)
+    stamp = datetime.datetime.now().strftime('%d-%m-%Y %H:%M')
+    destino = WEB or '.'
+    os.makedirs(destino, exist_ok=True)
+
+    with open(os.path.join(destino, 'datos.js'), 'w', encoding='utf-8') as f:
+        f.write('// Generado automaticamente desde el Excel. No editar a mano.\n')
+        f.write('const DATOS = ' + json.dumps(datos, ensure_ascii=False) + ';\n')
+
+    idx = (TPL
+           .replace('__DATOS_INLINE__', '<script src="datos.js"></script>')
+           .replace('__STAMP__', stamp)
+           .replace('__AVISO__', ''))
+    with open(os.path.join(destino, 'index.html'), 'w', encoding='utf-8') as f:
+        f.write(idx)
+
+    print(f'Listo: {destino}/index.html + datos.js  ({len(datos)} meses)')
+
+
+if __name__ == '__main__':
+    main()
