@@ -1,45 +1,69 @@
 # Control de facturas
 
-Dashboard de control de ingreso de facturas. Se publica con GitHub Pages y el
-enlace no cambia: cada `push` actualiza lo que ven todos.
+Dashboard de control de ingreso de facturas.
+Publicado en **https://martinezherrera.github.io/control-facturas/** — el enlace
+no cambia; cada `push` actualiza lo que ven todos.
 
-## Qué contiene
+## Estructura
 
-| Archivo | Rol |
-|---|---|
-| `index.html` | La página. Estructura y estilos; no lleva datos. Cambia poco. |
-| `datos.js` | Los datos, regenerados desde el Excel en cada publicación. |
+Una sola carpeta, que **es** el repositorio. Idéntica en cualquier PC.
 
-## Qué NO contiene, y por qué
+| Archivo | Versionado | Rol |
+|---|---|---|
+| `index.html` | sí | La página. Estructura y estilos; no lleva datos. |
+| `datos.js` | sí | Datos anonimizados. Se regenera en cada publicación. |
+| `generar_dashboard_html.py` | sí | El generador. Lógica, sin datos. |
+| `publicar.bat` | sí | Regenera y publica en un paso. |
+| `control de ingresos facturas.xlsx` | **no** | La fuente. |
+| `proveedores_map.csv` | **no** | Decodificador `PROV-nn` → razón social. |
+| `dashboard_facturas.html` | **no** | Versión local, con razones sociales reales. |
 
-Este repositorio es **público**. Por eso:
+Los tres últimos están bloqueados por `.gitignore` y **nunca** deben subirse:
+el repositorio es público.
 
-- El Excel de origen no se versiona.
-- Los proveedores aparecen como `PROV-01`, `PROV-02`, … La correspondencia con
-  las razones sociales vive en `proveedores_map.csv`, junto al Excel, **fuera de
-  este repositorio**. El `.gitignore` la bloquea.
-- La versión con nombres reales es `dashboard_facturas.html`, que se queda en el
-  computador y tampoco se versiona.
+## Publicar una actualización
 
-Lo que sí queda visible para cualquiera con la URL: montos facturados, cierres
-de mes, presupuestos mensuales y número de órdenes por canal. Es una decisión
-tomada a conciencia, no un descuido; si en algún momento deja de ser aceptable,
-la salida es pasar el repositorio a privado con un plan que habilite Pages.
+Actualiza la hoja `Exported` del Excel, guarda, y doble clic en `publicar.bat`.
 
-## Cómo publicar una actualización
-
-Desde `C:\CONTROL FACTURAS`, después de actualizar la hoja `Exported`:
+Equivale a:
 
 ```
-publicar.bat
+python generar_dashboard_html.py "control de ingresos facturas.xlsx" "dashboard_facturas.html" --web .
+git add index.html datos.js
+git commit -m "Actualizacion de datos"
+git push
 ```
 
-Eso regenera `datos.js` y hace `commit` y `push`. El sitio tarda entre 30
-segundos y un par de minutos en reflejar el cambio.
+## Trabajar desde otro PC
 
-## Códigos de proveedor
+```
+git clone https://github.com/martinezherrera/control-facturas.git
+```
 
-Son estables: un proveedor conserva su código entre ejecuciones. Los nuevos
-reciben el siguiente correlativo libre. No reordenar ni editar
-`proveedores_map.csv` a mano, o los códigos publicados dejarán de coincidir con
-los que ya circulan.
+El clon trae la página y la herramienta, pero **no** los datos. Copia a mano
+dentro de la carpeta clonada:
+
+- `control de ingresos facturas.xlsx`
+- `proveedores_map.csv`
+
+Requisitos: Python con `pandas` y `openpyxl`, y git.
+
+### Por qué el mapa de proveedores es crítico
+
+Los códigos `PROV-nn` se asignan por orden alfabético sobre los proveedores
+presentes. Si corres el script sin `proveedores_map.csv`, se genera uno desde
+cero: mientras el conjunto de proveedores sea idéntico da el mismo resultado,
+pero en cuanto aparezca un proveedor nuevo que caiga al medio del alfabeto,
+todos los códigos posteriores se corren. Quien tenga la tabla anterior leería
+mal el dashboard sin notarlo.
+
+Ese archivo viaja siempre con el Excel.
+
+## Qué queda visible públicamente
+
+Montos facturados, cierres de mes, presupuestos mensuales y número de órdenes
+por canal. Los proveedores aparecen solo como código.
+
+Es una decisión tomada a conciencia. Si deja de ser aceptable, la salida es
+repositorio privado con un plan que habilite Pages (Pro, Team o Enterprise);
+en plan gratuito, Pages solo funciona desde repositorios públicos.

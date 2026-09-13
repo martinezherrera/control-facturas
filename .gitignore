@@ -1,24 +1,27 @@
-# Nada de esto debe salir del computador.
-# El repositorio es publico: cualquier archivo versionado queda a la vista.
+# El repositorio es PUBLICO: cualquier archivo versionado queda a la vista.
+# Se versionan la pagina y la logica; nunca los datos.
 
-# Fuente de datos
+# --- Datos: jamas ---
 *.xlsx
 *.xls
 *.xlsm
-*.csv
+~$*
 
 # Correspondencia codigo -> razon social
 proveedores_map.csv
 proveedores_map.*
+*.csv
 
 # Version local del dashboard, que si lleva razones sociales reales
 dashboard_facturas.html
 
-# Scripts y temporales
-*.py
-*.bat
+# --- Temporales ---
 __pycache__/
-~$*
+*.pyc
 *.tmp
 .DS_Store
 Thumbs.db
+
+# Nota: generar_dashboard_html.py y publicar.bat SI se versionan.
+# No contienen datos, solo logica, y son lo que permite trabajar
+# desde cualquier PC con un git clone.

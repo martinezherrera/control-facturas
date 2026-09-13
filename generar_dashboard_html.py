@@ -1,4 +1,139 @@
-<!DOCTYPE html>
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Genera el dashboard de control de facturas a partir del Excel.
+
+Dos salidas:
+  * LOCAL  - un solo archivo HTML con los datos incrustados y las razones
+             sociales reales. Es el que usas tu.
+  * WEB    - carpeta con index.html + datos.js, con los proveedores
+             reemplazados por codigos PROV-nn. Es la que se sube a GitHub.
+
+Uso:
+    python generar_dashboard_html.py
+    python generar_dashboard_html.py "archivo.xlsx" "salida.html"
+    python generar_dashboard_html.py "archivo.xlsx" "salida.html" --web dashboard-web
+
+La correspondencia codigo -> razon social se guarda en proveedores_map.csv,
+JUNTO AL EXCEL y nunca dentro de la carpeta web. Los codigos son estables:
+un proveedor conserva el suyo entre ejecuciones.
+
+Requiere: pandas, openpyxl   ->   pip install pandas openpyxl
+"""
+import sys, os, json, csv, datetime, calendar
+import pandas as pd
+
+# ----------------------------------------------------------------------
+# Regla del modelo (reconstruida desde Hoja3 y validada contra sus totales)
+#   Estado "Cerrada" o "Cerrada para recepcion"
+#   Y Fecha de cierre dentro del mes
+#
+# CIERRE DE MES = TOTAL FACTURADO + PROVISION DEL MES - REVIERTE PROVISION
+# El PRESUPUESTO se compara contra el CIERRE DE MES (no contra el total facturado).
+# ----------------------------------------------------------------------
+ESTADOS = ['Cerrada', 'Cerrada para recepción']
+GRUPOS = {
+    'PRIMARIA':   ['PRIMARIA'],
+    'SECUNDARIA': ['SECUNDARIA'],
+    'OTROS':      ['OTROS', 'MATERIA PRIMA', 'BANDEJAS'],
+}
+HOJA_PARAM = {'PRIMARIA': 'PRIMARIA', 'SECUNDARIA': 'SECUNDARIA', 'OTROS': None}
+
+_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+XLSX = _args[0] if len(_args) > 0 else 'control de ingresos facturas.xlsx'
+HTML = _args[1] if len(_args) > 1 else 'dashboard_facturas.html'
+WEB = None
+if '--web' in sys.argv:
+    i = sys.argv.index('--web')
+    WEB = sys.argv[i + 1] if len(sys.argv) > i + 1 else 'dashboard-web'
+
+MESES_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio',
+            'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+
+
+def leer(path):
+    ex = pd.read_excel(path, sheet_name='Exported')
+    ex = ex[['CANAL', 'Orden', 'Descripción', 'Estado', 'Proveedor',
+             'Ordenado', 'Fecha de cierre']].copy()
+    ex['CANAL'] = ex['CANAL'].astype('object').where(ex['CANAL'].notna(), None)
+    ex['Fecha de cierre'] = pd.to_datetime(ex['Fecha de cierre'], errors='coerce')
+    ex = ex[ex['Estado'].isin(ESTADOS) & ex['Fecha de cierre'].notna()]
+    params = {}
+    for h in ('PRIMARIA', 'SECUNDARIA'):
+        p = pd.read_excel(path, sheet_name=h)
+        p['FECHA'] = pd.to_datetime(p['FECHA'], errors='coerce')
+        params[h] = {
+            d.strftime('%Y-%m'): {
+                'presupuesto': None if pd.isna(r['PRESUPUESTO']) else float(r['PRESUPUESTO']),
+                'provision':   None if pd.isna(r['PROVISION']) else float(r['PROVISION']),
+                'reversa':     None if pd.isna(r['REVERSA PROVISION']) else float(r['REVERSA PROVISION']),
+            }
+            for d, (_, r) in zip(p['FECHA'], p.iterrows()) if not pd.isna(d)
+        }
+    return ex, params
+
+
+def construir(ex, params):
+    ex = ex.copy()
+    ex['mes'] = ex['Fecha de cierre'].dt.strftime('%Y-%m')
+    ex['dia'] = ex['Fecha de cierre'].dt.day
+
+    canal_a_grupo = {c: g for g, cs in GRUPOS.items() for c in cs}
+    ex['grupo'] = ex['CANAL'].map(canal_a_grupo)
+
+    meses = sorted(set(ex['mes']) | set(params['PRIMARIA']) | set(params['SECUNDARIA']))
+    out = {}
+    for m in meses:
+        sub = ex[ex['mes'] == m]
+        anio, mm = int(m[:4]), int(m[5:])
+        ndias = calendar.monthrange(anio, mm)[1]
+        filas, series = [], {}
+        for g in GRUPOS:
+            s = sub[sub['grupo'] == g]
+            total = float(s['Ordenado'].sum())
+            hoja = HOJA_PARAM[g]
+            pr = params[hoja].get(m, {}) if hoja else {}
+            presup, prov, rev = pr.get('presupuesto'), pr.get('provision'), pr.get('reversa')
+            cierre = total - (rev or 0) + (prov or 0)
+            filas.append({
+                'cuenta': g, 'cierre': cierre, 'presupuesto': presup,
+                'reversa': rev, 'provision': prov, 'total': total,
+                'n': int(len(s)),
+                'avance': (cierre / presup) if presup else None,
+                'saldo': (presup - cierre) if presup else None,
+            })
+            if g in ('PRIMARIA', 'SECUNDARIA'):
+                # ingreso de facturas: monto facturado acumulado dia a dia.
+                # Sin ajuste de provision; termina en TOTAL FACTURAS MES.
+                por_dia = s.groupby('dia')['Ordenado'].sum()
+                acum, running = [], 0.0
+                for d in range(1, ndias + 1):
+                    running += float(por_dia.get(d, 0.0))
+                    acum.append(running)
+                series[g] = acum
+
+            det = (s.groupby('Proveedor')['Ordenado']
+                     .agg(['count', 'sum']).reset_index()
+                     .sort_values('sum', ascending=False))
+            filas[-1]['detalle'] = [
+                {'prov': r['Proveedor'], 'n': int(r['count']), 'monto': float(r['sum'])}
+                for _, r in det.iterrows()]
+
+        sin_canal = sub[sub['grupo'].isna()]
+        out[m] = {
+            'etiqueta': f'{MESES_ES[mm-1]} {anio}',
+            'ndias': ndias,
+            'filas': filas,
+            'series': series,
+            'presupuestos': {g: (params[HOJA_PARAM[g]].get(m, {}) or {}).get('presupuesto')
+                             for g in ('PRIMARIA', 'SECUNDARIA')},
+            'sin_canal': {'n': int(len(sin_canal)),
+                          'monto': float(sin_canal['Ordenado'].sum())},
+        }
+    return out
+
+
+TPL = r"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
@@ -79,8 +214,8 @@
   <header>
     <div>
       <h1>Control de facturas</h1>
-      <p class="sub">Estado &laquo;Cerrada&raquo; o &laquo;Cerrada para recepci&oacute;n&raquo; con fecha de cierre dentro del mes &middot; generado 13-09-2026 18:29</p>
-      <p class="sub">Proveedores identificados por c&oacute;digo. La correspondencia no se publica.</p>
+      <p class="sub">Estado &laquo;Cerrada&raquo; o &laquo;Cerrada para recepci&oacute;n&raquo; con fecha de cierre dentro del mes &middot; generado __STAMP__</p>
+      __AVISO__
     </div>
     <label class="sel">Mes <select id="mes"></select></label>
   </header>
@@ -104,7 +239,7 @@
 </div>
 <div class="tip" id="tip"></div>
 
-<script src="datos.js"></script>
+__DATOS_INLINE__
 <script>
 const fmt  = n => n==null ? "–" : "$" + Math.round(n).toLocaleString("es-CL");
 const fmtK = n => n==null ? "–" : "$" + Math.round(n/1e6).toLocaleString("es-CL") + "M";
@@ -259,3 +394,102 @@ render(selMes.value);
 </script>
 </body>
 </html>
+"""
+
+
+# ----------------------------------------------------------------------
+# Anonimizacion de proveedores
+# ----------------------------------------------------------------------
+def cargar_mapa(ruta):
+    """Lee proveedores_map.csv. Devuelve {razon social: codigo}."""
+    if not os.path.exists(ruta):
+        return {}
+    with open(ruta, encoding='utf-8-sig', newline='') as f:
+        return {r['proveedor']: r['codigo'] for r in csv.DictReader(f)
+                if r.get('proveedor') and r.get('codigo')}
+
+
+def guardar_mapa(ruta, mapa):
+    with open(ruta, 'w', encoding='utf-8-sig', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['codigo', 'proveedor'])
+        for prov, cod in sorted(mapa.items(), key=lambda kv: kv[1]):
+            w.writerow([cod, prov])
+
+
+def asignar_codigos(datos, ruta_mapa):
+    """Asigna un codigo estable a cada proveedor. Los ya presentes en el CSV
+    conservan el suyo; los nuevos reciben el siguiente correlativo libre."""
+    mapa = cargar_mapa(ruta_mapa)
+    usados = {int(c.split('-')[1]) for c in mapa.values()
+              if c.startswith('PROV-') and c.split('-')[1].isdigit()}
+    siguiente = max(usados) + 1 if usados else 1
+
+    presentes = set()
+    for mes in datos.values():
+        for fila in mes['filas']:
+            for p in fila['detalle']:
+                presentes.add(p['prov'])
+
+    for prov in sorted(presentes):
+        if prov not in mapa:
+            mapa[prov] = f'PROV-{siguiente:02d}'
+            siguiente += 1
+    guardar_mapa(ruta_mapa, mapa)
+    return mapa
+
+
+def anonimizar(datos, mapa):
+    """Copia de los datos con las razones sociales sustituidas por codigos."""
+    copia = json.loads(json.dumps(datos, ensure_ascii=False))
+    for mes in copia.values():
+        for fila in mes['filas']:
+            for pr in fila['detalle']:
+                pr['prov'] = mapa.get(pr['prov'], 'PROV-??')
+    return copia
+
+
+def main():
+    if not os.path.exists(XLSX):
+        sys.exit(f'No encuentro el archivo: {XLSX}')
+    ex, params = leer(XLSX)
+    datos = construir(ex, params)
+    stamp = datetime.datetime.now().strftime('%d-%m-%Y %H:%M')
+
+    # ---- salida local: datos reales, un solo archivo ----
+    html = (TPL
+            .replace('__DATOS_INLINE__',
+                     '<script>const DATOS = ' + json.dumps(datos, ensure_ascii=False) + ';</script>')
+            .replace('__STAMP__', stamp)
+            .replace('__AVISO__', ''))
+    with open(HTML, 'w', encoding='utf-8') as f:
+        f.write(html)
+    print(f'Local : {HTML}  ({len(datos)} meses, razones sociales reales)')
+
+    # ---- salida web: datos.js aparte y proveedores codificados ----
+    if WEB:
+        ruta_mapa = os.path.join(os.path.dirname(os.path.abspath(XLSX)) or '.',
+                                 'proveedores_map.csv')
+        mapa = asignar_codigos(datos, ruta_mapa)
+        anon = anonimizar(datos, mapa)
+
+        os.makedirs(WEB, exist_ok=True)
+        with open(os.path.join(WEB, 'datos.js'), 'w', encoding='utf-8') as f:
+            f.write('// Generado automaticamente. No editar a mano.\n')
+            f.write('// Proveedores anonimizados: la correspondencia vive en\n')
+            f.write('// proveedores_map.csv, junto al Excel, fuera de este repositorio.\n')
+            f.write('const DATOS = ' + json.dumps(anon, ensure_ascii=False) + ';\n')
+        aviso = ('<p class="sub">Proveedores identificados por c&oacute;digo. '
+                 'La correspondencia no se publica.</p>')
+        idx = (TPL
+               .replace('__DATOS_INLINE__', '<script src="datos.js"></script>')
+               .replace('__STAMP__', stamp)
+               .replace('__AVISO__', aviso))
+        with open(os.path.join(WEB, 'index.html'), 'w', encoding='utf-8') as f:
+            f.write(idx)
+        print(f'Web   : {WEB}/index.html + datos.js  ({len(mapa)} proveedores codificados)')
+        print(f'Mapa  : {ruta_mapa}  <- NO subir a GitHub')
+
+
+if __name__ == '__main__':
+    main()
