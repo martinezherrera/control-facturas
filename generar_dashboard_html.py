@@ -197,6 +197,15 @@ TPL = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Control de facturas</title>
+<script>
+/* Aplica el tema guardado ANTES del primer pintado. Si esto corriera al final
+   del documento, junto al resto del javascript, quien eligio oscuro veria un
+   destello claro en cada recarga, y el muro recarga cada 10 minutos. */
+try{
+  if(localStorage.getItem("cf-tema") === "dark")
+    document.documentElement.dataset.theme = "dark";
+}catch(e){ /* almacenamiento bloqueado: se queda con el tema claro */ }
+</script>
 <style>
   :root{
     color-scheme: light;
@@ -206,21 +215,23 @@ TPL = r"""<!DOCTYPE html>
     --s1:#2a78d6; --s2:#eb6834;
     --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
   }
-  @media (prefers-color-scheme: dark){
-    :root:not([data-theme="light"]){
-      color-scheme: dark;
-      --plane:#0d0d0d; --surface:#1a1a19;
-      --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
-      --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
-      --s1:#3987e5; --s2:#d95926;
-    }
-  }
+  /* El tema claro de arriba es el piso: la pagina parte clara siempre, sin
+     mirar el modo del sistema operativo. El oscuro se activa solo cuando el
+     boton escribe data-theme="dark", y por eso vive en un unico bloque: antes
+     estaba duplicado (uno dentro de un @media prefers-color-scheme) y los dos
+     podian quedar distintos sin que nadie lo notara.
+     Paleta tomada del dashboard de Costos de Transporte (escala slate). */
   :root[data-theme="dark"]{
     color-scheme: dark;
-    --plane:#0d0d0d; --surface:#1a1a19;
-    --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
-    --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
-    --s1:#3987e5; --s2:#d95926;
+    --plane:#0f172a; --surface:#1e293b;
+    /* --muted es #64748b en la captura de referencia, pero ahi queda en
+       3,07:1 sobre la superficie de las tarjetas y lo usa el texto mas chico
+       de la pagina (rotulos de 11,5px, encabezados de tabla de 11px). Se sube
+       un escalon de la misma escala slate, a 5,71:1. */
+    --ink:#f1f5f9; --ink-2:#cbd5e1; --muted:#94a3b8;
+    --grid:#334155; --axis:#475569; --ring:rgba(148,163,184,.18);
+    --s1:#3b82f6; --s2:#ea580c;
+    --good:#34d399; --warn:#ffd27a; --crit:#f87171;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--plane);color:var(--ink);
@@ -237,6 +248,7 @@ TPL = r"""<!DOCTYPE html>
     h2{font-size:16px}
     table{font-size:14px}
     th,td{padding:11px 13px}
+    button.tema{font-size:14px;padding:9px 15px}
   }
   @media (min-width:2200px){
     body{font-size:19px}
@@ -252,6 +264,11 @@ TPL = r"""<!DOCTYPE html>
   select{font:inherit;padding:7px 12px;border-radius:8px;border:1px solid var(--axis);
          background:var(--surface);color:var(--ink);min-width:190px}
   label.sel{display:flex;gap:9px;align-items:center;font-size:12.5px;color:var(--ink-2)}
+  .ctrl{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  button.tema{font:inherit;font-size:12.5px;padding:7px 13px;border-radius:8px;
+      border:1px solid var(--axis);background:var(--surface);color:var(--ink-2);
+      cursor:pointer;white-space:nowrap}
+  button.tema:hover{color:var(--ink);border-color:var(--ink-2)}
   .card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:18px 20px}
   .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:22px 0}
   .tile .lbl{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -324,7 +341,10 @@ TPL = r"""<!DOCTYPE html>
       <p class="sub">Estado &laquo;Cerrada&raquo; o &laquo;Cerrada para recepci&oacute;n&raquo; con fecha de cierre dentro del mes &middot; generado <span id="sello">__STAMP__</span></p>
       __AVISO__
     </div>
-    <label class="sel">Mes <select id="mes"></select></label>
+    <div class="ctrl">
+      <label class="sel">Mes <select id="mes"></select></label>
+      <button type="button" class="tema" id="tema"></button>
+    </div>
   </header>
 
   <div class="tiles" id="tiles"></div>
@@ -556,6 +576,29 @@ document.getElementById("ficha-x").addEventListener("click", ()=>ficha.close());
 ficha.addEventListener("click", e=>{ if(e.target===ficha) ficha.close(); });
 // cambiar de mes con la ficha abierta dejaria datos de otro mes a la vista
 selMes.addEventListener("change", ()=>{ if(ficha.open) ficha.close(); });
+
+// ---------------- tema claro / oscuro ----------------
+// El claro es el tema base de la hoja de estilos. El boton solo agrega o quita
+// data-theme="dark" en <html>: todo lo demas son tokens CSS, asi que hasta el
+// grafico SVG cambia de color sin redibujarse. La eleccion queda guardada por
+// navegador, y el script del <head> la aplica antes del primer pintado.
+const btnTema = document.getElementById("tema");
+const esOscuro = () => document.documentElement.dataset.theme === "dark";
+
+function rotularTema(){
+  btnTema.textContent = esOscuro() ? "◐ Claro" : "◐ Oscuro";
+  btnTema.setAttribute("aria-label",
+    esOscuro() ? "Cambiar al tema claro" : "Cambiar al tema oscuro");
+}
+
+btnTema.addEventListener("click", ()=>{
+  if(esOscuro()) delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = "dark";
+  try{ localStorage.setItem("cf-tema", esOscuro() ? "dark" : "light"); }
+  catch(e){ /* sin almacenamiento el tema dura hasta la proxima recarga */ }
+  rotularTema();
+});
+rotularTema();
 
 // ---------------- recarga automatica ----------------
 // Reemplaza al <meta http-equiv="refresh">, que no se puede cancelar: si la
