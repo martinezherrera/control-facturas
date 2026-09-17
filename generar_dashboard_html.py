@@ -46,6 +46,26 @@ def normalizar_canal(v):
     return t if t and t != 'NAN' else None
 
 
+def numero(v):
+    """Monto seguro: NaN -> 0.0. json.dumps escribiria NaN, que no es JSON."""
+    return 0.0 if pd.isna(v) else float(v)
+
+
+def limpiar(v):
+    """Texto seguro para el detalle: NaN -> cadena vacia."""
+    return '' if pd.isna(v) else str(v).strip()
+
+
+def texto_orden(v):
+    """El numero de orden como texto, sin el .0 que agrega pandas al leerlo
+    como float cuando la columna viene numerica."""
+    if pd.isna(v):
+        return ''
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
 def derivar_canal(descripcion):
     """Replica la formula de la columna CANAL sobre la Descripcion."""
     t = str(descripcion or '').upper()
@@ -138,12 +158,24 @@ def construir(ex, params):
                     acum.append(running)
                 series[g] = acum
 
-            det = (s.groupby('Proveedor')['Ordenado']
-                     .agg(['count', 'sum']).reset_index()
-                     .sort_values('sum', ascending=False))
-            filas[-1]['detalle'] = [
-                {'prov': r['Proveedor'], 'n': int(r['count']), 'monto': float(r['sum'])}
-                for _, r in det.iterrows()]
+            # Detalle por proveedor, con las ordenes anidadas. Salen del MISMO
+            # subconjunto 's' que produce el total de la fila, que ya viene
+            # filtrado por estado, por mes y por canal: el detalle que se abre
+            # al pinchar no puede descuadrar con la tarjeta desde donde se abre.
+            det = []
+            for prov, gp in s.groupby('Proveedor', sort=False):
+                ordenes = [
+                    {'orden': texto_orden(r['Orden']),
+                     'desc':  limpiar(r['Descripción']),
+                     'fecha': r['Fecha de cierre'].strftime('%d-%m-%Y'),
+                     'monto': numero(r['Ordenado'])}
+                    for _, r in gp.sort_values('Fecha de cierre',
+                                               ascending=False).iterrows()]
+                det.append({'prov': prov, 'n': len(ordenes),
+                            'monto': float(gp['Ordenado'].sum()),
+                            'ordenes': ordenes})
+            det.sort(key=lambda p: p['monto'], reverse=True)
+            filas[-1]['detalle'] = det
 
         sin_canal = sub[sub['grupo'].isna()]
         out[m] = {
@@ -164,7 +196,6 @@ TPL = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="600">
 <title>Control de facturas</title>
 <style>
   :root{
@@ -253,6 +284,35 @@ TPL = r"""<!DOCTYPE html>
        padding:9px 12px;font-size:12.5px;box-shadow:0 4px 16px rgba(0,0,0,.14);z-index:9}
   .tip .r{display:flex;gap:10px;justify-content:space-between;font-variant-numeric:tabular-nums}
   .tip .r span:first-child{color:var(--ink-2)}
+
+  /* --- detalle de ordenes por proveedor --- */
+  tr.pick{cursor:pointer}
+  tr.pick:hover td{background:var(--grid)}
+  tr.pick:focus-visible{outline:2px solid var(--s1);outline-offset:-2px}
+  /* el espacio duro evita que el chevron caiga solo en la linea siguiente
+     cuando la razon social envuelve */
+  tr.pick td:first-child::after{content:"\00a0\203A";color:var(--muted);font-weight:600}
+  dialog#ficha{border:1px solid var(--ring);border-radius:14px;padding:0;
+      background:var(--surface);color:var(--ink);max-width:min(880px,94vw);width:100%;
+      box-shadow:0 18px 60px rgba(0,0,0,.28)}
+  dialog#ficha::backdrop{background:rgba(0,0,0,.45)}
+  #ficha .head{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;
+      padding:20px 22px 14px;border-bottom:1px solid var(--grid)}
+  #ficha .head h3{margin:0;font-size:17px;letter-spacing:-.01em;line-height:1.3}
+  #ficha .head .ctx{color:var(--muted);font-size:12.5px;margin:5px 0 0}
+  #ficha .head .tot{color:var(--ink-2);font-size:13px;margin:8px 0 0;
+      font-variant-numeric:tabular-nums}
+  #ficha .x{flex:none;border:1px solid var(--ring);background:transparent;color:var(--ink-2);
+      border-radius:8px;width:32px;height:32px;font-size:17px;line-height:1;cursor:pointer}
+  #ficha .x:hover{background:var(--grid);color:var(--ink)}
+  #ficha .body{padding:6px 22px 20px;max-height:min(62vh,560px);overflow:auto}
+  #ficha td.desc,#ficha th.desc{white-space:normal;text-align:left;
+      color:var(--ink-2);min-width:180px}
+  #ficha th.desc{color:var(--muted)}
+  @media (min-width:1600px){
+    dialog#ficha{max-width:min(1120px,92vw)}
+    #ficha .head h3{font-size:21px} #ficha .body table{font-size:14px}
+  }
   @media (max-width:560px){ header{align-items:stretch} .wrap{padding-block:20px 40px} }
 </style>
 </head>
@@ -280,11 +340,24 @@ TPL = r"""<!DOCTYPE html>
   </div>
 
   <h2>Detalle por proveedor</h2>
+  <p class="note" style="margin:-6px 0 12px">Pincha una fila para ver las &oacute;rdenes de compra de ese proveedor.</p>
   <div class="cols" id="detalle"></div>
 
   <div id="control"></div>
 </div>
 <div class="tip" id="tip"></div>
+
+<dialog id="ficha" aria-labelledby="ficha-tit">
+  <div class="head">
+    <div>
+      <h3 id="ficha-tit"></h3>
+      <p class="ctx" id="ficha-ctx"></p>
+      <p class="tot" id="ficha-tot"></p>
+    </div>
+    <button class="x" id="ficha-x" aria-label="Cerrar">&times;</button>
+  </div>
+  <div class="body scroll"><table id="ficha-tabla"></table></div>
+</dialog>
 
 __DATOS_INLINE__
 <script>
@@ -292,6 +365,8 @@ const fmt  = n => n==null ? "–" : "$" + Math.round(n).toLocaleString("es-CL");
 const fmtK = n => n==null ? "–" : "$" + Math.round(n/1e6).toLocaleString("es-CL") + "M";
 const fmtP = n => n==null ? "–" : (n*100).toFixed(1).replace(".",",") + "%";
 const COL  = {PRIMARIA:"var(--s1)", SECUNDARIA:"var(--s2)", OTROS:"var(--muted)"};
+const esc  = s => String(s==null?"":s).replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 const selMes = document.getElementById("mes");
 Object.keys(DATOS).sort().reverse().forEach(m=>{
@@ -334,11 +409,15 @@ function render(m){
         : fmt(suma(c[1]))}</td>`).join("")}</tr></tfoot>`;
 
   // ---- detalle ----
-  document.getElementById("detalle").innerHTML = d.filas.map(f=>
+  // Cada fila queda pinchable y apunta a su proveedor por indice (cuenta,
+  // posicion). No lleva el nombre en el atributo: el indice no se rompe con
+  // comillas ni acentos en la razon social.
+  document.getElementById("detalle").innerHTML = d.filas.map((f,gi)=>
     `<div class="card"><h2 style="margin:0 0 10px">${f.cuenta}</h2><div class="scroll"><table>
       <thead><tr><th>Proveedor</th><th class="num">N°</th><th class="num">Monto</th></tr></thead>
-      <tbody>${f.detalle.length ? f.detalle.map(p=>
-        `<tr><td>${p.prov}</td><td class="num">${p.n}</td><td class="num">${fmt(p.monto)}</td></tr>`).join("")
+      <tbody>${f.detalle.length ? f.detalle.map((p,pi)=>
+        `<tr class="pick" tabindex="0" role="button" data-g="${gi}" data-p="${pi}"
+             aria-label="Ver órdenes de ${esc(p.prov)}"><td>${esc(p.prov)}</td><td class="num">${p.n}</td><td class="num">${fmt(p.monto)}</td></tr>`).join("")
         : `<tr><td colspan="3" style="color:var(--muted)">Sin facturas este mes</td></tr>`}</tbody>
       <tfoot><tr><td>Total general</td><td class="num">${f.n}</td><td class="num">${fmt(f.total)}</td></tr></tfoot>
     </table></div></div>`).join("");
@@ -432,6 +511,63 @@ function dibujar(d){
   });
   svg.addEventListener("pointerleave", ()=>{ tip.style.opacity=0; cross.setAttribute("opacity",0); });
 }
+
+// ---------------- detalle de ordenes de un proveedor ----------------
+// El contenido sale de DATOS[mes].filas[g].detalle[p].ordenes, o sea del mismo
+// nodo que produjo la fila pinchada. Mes, canal y estado ya estan aplicados
+// aguas arriba: no hay que volver a filtrar aqui, y no se pueden desalinear.
+const ficha = document.getElementById("ficha");
+
+function abrirFicha(gi, pi){
+  const d = DATOS[selMes.value];
+  const f = d.filas[gi]; if(!f) return;
+  const p = f.detalle[pi]; if(!p) return;
+
+  document.getElementById("ficha-tit").textContent = p.prov;
+  document.getElementById("ficha-ctx").textContent = `${f.cuenta} · ${d.etiqueta}`;
+  document.getElementById("ficha-tot").textContent =
+    `${p.n} ${p.n===1?"orden":"órdenes"} · ${fmt(p.monto)}`;
+
+  const ord = p.ordenes || [];
+  document.getElementById("ficha-tabla").innerHTML =
+    `<thead><tr><th>Orden</th><th class="desc">Descripción</th><th class="num">Fecha de cierre</th>
+       <th class="num">Monto</th></tr></thead>
+     <tbody>${ord.map(o=>
+       `<tr><td>${esc(o.orden)||"–"}</td><td class="desc">${esc(o.desc)||"–"}</td>
+          <td class="num">${o.fecha}</td><td class="num">${fmt(o.monto)}</td></tr>`).join("")}</tbody>
+     <tfoot><tr><td colspan="3">Total</td><td class="num">${fmt(p.monto)}</td></tr></tfoot>`;
+
+  ficha.showModal();
+}
+
+// Delegacion: las tablas de detalle se regeneran en cada render, asi que el
+// listener vive en el contenedor y no en las filas.
+document.getElementById("detalle").addEventListener("click", e=>{
+  const tr = e.target.closest("tr.pick");
+  if(tr) abrirFicha(+tr.dataset.g, +tr.dataset.p);
+});
+document.getElementById("detalle").addEventListener("keydown", e=>{
+  if(e.key!=="Enter" && e.key!==" ") return;
+  const tr = e.target.closest("tr.pick");
+  if(tr){ e.preventDefault(); abrirFicha(+tr.dataset.g, +tr.dataset.p); }
+});
+document.getElementById("ficha-x").addEventListener("click", ()=>ficha.close());
+// click fuera del cuadro: el backdrop pertenece al propio <dialog>
+ficha.addEventListener("click", e=>{ if(e.target===ficha) ficha.close(); });
+// cambiar de mes con la ficha abierta dejaria datos de otro mes a la vista
+selMes.addEventListener("change", ()=>{ if(ficha.open) ficha.close(); });
+
+// ---------------- recarga automatica ----------------
+// Reemplaza al <meta http-equiv="refresh">, que no se puede cancelar: si la
+// ficha esta abierta la recarga se posterga hasta que se cierre. La pantalla
+// del muro no abre fichas, asi que ahi el ciclo de 10 minutos no cambia.
+const LAPSO = 600000;
+let vence = Date.now() + LAPSO;
+setInterval(()=>{
+  if(Date.now() < vence) return;
+  if(ficha.open){ vence = Date.now() + 60000; return; }
+  location.reload();
+}, 15000);
 
 const HOY = new Date();
 const CLAVE_HOY = `${HOY.getFullYear()}-${String(HOY.getMonth()+1).padStart(2,"0")}`;
