@@ -14,3 +14,6 @@ __pycache__/
 *.pyc
 *.tmp
 Thumbs.db
+credenciales.txt
+ordenes_otbi.csv
+*respaldo*.xlsx
